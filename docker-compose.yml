@@ -1,0 +1,20 @@
+#start the 3 servers
+services:
+  scala:
+    image: jorgemartinezpizarro/lucas-lehmer-scala-server:latest
+    restart: always
+    ports:
+      - 8080:8080
+
+  go:
+    image: jorgemartinezpizarro/lucas-lehmer-go-server:latest
+    restart: always
+    ports:
+      - 5002:8080
+
+  python:
+    image: jorgemartinezpizarro/lucas-lehmer-python-server:latest
+    restart: always
+    ports:
+      - 5000:5000
+
