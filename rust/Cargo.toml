@@ -1,0 +1,11 @@
+[package]
+name = "llt_server"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+warp = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+num-bigint = "0.4"
+num-traits = "0.2"

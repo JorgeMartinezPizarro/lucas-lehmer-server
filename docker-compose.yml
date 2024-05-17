@@ -10,3 +10,10 @@ services:
     restart: always
     ports:
       - 5002:8080
+
+  rust:
+    image: jorgemartinezpizarro/lucas-lehmer-rust-server:latest
+    restart: always
+    ports:
+      - 3030:3030
+
