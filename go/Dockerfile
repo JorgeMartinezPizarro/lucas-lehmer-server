@@ -1,6 +1,9 @@
 # Use the official Golang image
 FROM golang:latest
 
+# Install GMP library
+RUN apt-get update && apt-get install -y libgmp-dev
+
 # Set the Current Working Directory inside the container
 WORKDIR /app
 
@@ -19,4 +22,3 @@ EXPOSE 8080
 
 # Command to run the executable
 CMD ["./app"]
-

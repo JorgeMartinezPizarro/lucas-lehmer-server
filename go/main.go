@@ -3,34 +3,37 @@ package main
 import (
     "encoding/json"
     "fmt"
-    "math/big"
     "net/http"
     "sync"
     "github.com/gorilla/mux"
     "strings"
+    "github.com/ncw/gmp"
 )
 
-func lucasLehmerTest(p *big.Int, wg *sync.WaitGroup, results chan<- bool) {
+// lucasLehmerTest using gmp for high precision arithmetic
+func lucasLehmerTest(p *gmp.Int, wg *sync.WaitGroup, results chan<- bool) {
     defer wg.Done()
 
-    if p.Cmp(big.NewInt(2)) == 0 {
+    if p.Cmp(gmp.NewInt(2)) == 0 {
         results <- true
         return
     }
 
-    s := big.NewInt(4)
-    mersenneNumber := new(big.Int).Sub(new(big.Int).Exp(big.NewInt(2), p, nil), big.NewInt(1))
+    s := gmp.NewInt(4)
+    two := gmp.NewInt(2)
+    mersenneNumber := new(gmp.Int).Sub(new(gmp.Int).Exp(gmp.NewInt(2), p, nil), gmp.NewInt(1))
 
     for i := int64(0); i < p.Int64()-2; i++ {
         s.Mul(s, s)
-        s.Sub(s, big.NewInt(2))
+        s.Sub(s, two)
         s.Mod(s, mersenneNumber)
     }
 
-    isPrime := s.Cmp(big.NewInt(0)) == 0
+    isPrime := s.Cmp(gmp.NewInt(0)) == 0
     results <- isPrime
 }
 
+// LLTPHandler to handle incoming HTTP requests for LLT
 func LLTPHandler(w http.ResponseWriter, r *http.Request) {
     var requestData struct {
         Numbers    string `json:"numbers"`
@@ -48,10 +51,10 @@ func LLTPHandler(w http.ResponseWriter, r *http.Request) {
 
     // Split the numbers string by comma and convert them to integers
     numberStrs := strings.Split(requestData.Numbers, ",")
-    var numbers []*big.Int
+    var numbers []*gmp.Int
     for _, numStr := range numberStrs {
-        num, ok := new(big.Int).SetString(numStr, 10)
-        if !ok {
+        num := new(gmp.Int)
+        if _, ok := num.SetString(numStr, 10); !ok {
             fmt.Println("Invalid number:", numStr)
             http.Error(w, fmt.Sprintf("Invalid number: %s", numStr), http.StatusBadRequest)
             return
@@ -67,7 +70,7 @@ func LLTPHandler(w http.ResponseWriter, r *http.Request) {
 
     for _, num := range numbers {
         wg.Add(1)
-        go func(num *big.Int) {
+        go func(num *gmp.Int) {
             defer wg.Done()
             var wgLLT sync.WaitGroup
             var result bool

@@ -16,4 +16,9 @@ services:
     restart: always
     ports:
       - 3030:3030
+  c:
+    image: jorgemartinezpizarro/lucas-lehmer-c-server:latest
+    restart: always
+    ports:
+      - 5003:8080
 
