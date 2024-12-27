@@ -1,1 +1,0 @@
-# lucas-lehmer-scala-server
