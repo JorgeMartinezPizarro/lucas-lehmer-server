@@ -1,21 +1,6 @@
 services:
-  scala:
-    image: jorgemartinezpizarro/lucas-lehmer-server:scala
-    restart: always
-    ports:
-      - 8080:8080
   go:
     image: jorgemartinezpizarro/lucas-lehmer-server:go
     restart: always
     ports:
       - 5002:8080
-  rust:
-    image: jorgemartinezpizarro/lucas-lehmer-server:rust
-    restart: always
-    ports:
-      - 3030:3030
-  c:
-    image: jorgemartinezpizarro/lucas-lehmer-server:c
-    restart: always
-    ports:
-      - 5003:8080

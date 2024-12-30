@@ -38,3 +38,5 @@ https://hub.docker.com/repository/docker/jorgemartinezpizarro/lucas-lehmer-serve
 ## TODO
 
 Add each endpoint spec (PORT, parameters)
+
+Use Python flask to manage other services, in special Fortran and Go.
