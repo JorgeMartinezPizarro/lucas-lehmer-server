@@ -4,3 +4,8 @@ services:
     restart: always
     ports:
       - 5002:8080
+  fortran:
+    image: jorgemartinezpizarro/lucas-lehmer-server:fortran
+    restart: always
+    ports:
+      - 5003:5000
