@@ -20,12 +20,25 @@ TestResult* results;
 pthread_t* threads;
 int count;
 
-sem_t thread_limiter;  // Semáforo para limitar hilos simultáneos
+sem_t thread_limiter;
 
 void* thread_func(void* arg) {
     ThreadInput* input = (ThreadInput*)arg;
     int p = input->p;
     int index = input->index;
+
+    printf("Thread %d started for p=%d\n", index, p);
+    fflush(stdout);
+
+    if (p == 2) {
+        results[index].p = p;
+        results[index].result = true;
+        free(arg);
+        sem_post(&thread_limiter);  // 🔧 IMPORTANTE: liberar el semáforo
+        printf("Thread %d done for p=2 (trivial prime)\n", index);
+        fflush(stdout);
+        return NULL;
+    }
 
     mpz_t m, s, two;
     mpz_inits(m, s, two, NULL);
@@ -33,15 +46,6 @@ void* thread_func(void* arg) {
     // m = 2^p - 1
     mpz_ui_pow_ui(m, 2, p);
     mpz_sub_ui(m, m, 1);
-
-    if (p == 2) {
-        // 2^2 - 1 = 3, que es primo
-        results[index].p = p;
-        results[index].result = true;
-        mpz_clears(m, s, two, NULL);
-        free(arg);
-        return NULL;
-    }
 
     mpz_set_ui(s, 4);
     mpz_set_ui(two, 2);
@@ -57,15 +61,20 @@ void* thread_func(void* arg) {
 
     mpz_clears(m, s, two, NULL);
     free(arg);
+
+    sem_post(&thread_limiter);  // 🔧 IMPORTANTE: liberar semáforo tras el trabajo
+    printf("Thread %d done for p=%d result=%s\n", index, p, results[index].result ? "true" : "false");
+    fflush(stdout);
+
     return NULL;
 }
 
 int main() {
-    char buffer[65536];  // Más grande por si la entrada es grande
-    size_t bytes_read = fread(buffer, 1, sizeof(buffer)-1, stdin);
+    char buffer[65536];
+    size_t bytes_read = fread(buffer, 1, sizeof(buffer) - 1, stdin);
     buffer[bytes_read] = '\0';
 
-    int max_threads = 8;  // Ajusta según cores y RAM, 8 es conservador
+    int max_threads = 8;
     sem_init(&thread_limiter, 0, max_threads);
 
     int* numbers = malloc(sizeof(int) * 100000);
@@ -74,7 +83,7 @@ int main() {
     char* token = strtok(buffer, "[, ]");
     while (token != NULL) {
         int val = atoi(token);
-        if(val > 0) {  // Validar número positivo
+        if (val > 0) {
             numbers[count++] = val;
         }
         token = strtok(NULL, "[, ]");
@@ -84,7 +93,7 @@ int main() {
     threads = malloc(sizeof(pthread_t) * count);
 
     for (int i = 0; i < count; ++i) {
-        sem_wait(&thread_limiter);  // Esperamos que haya slot para nuevo hilo
+        sem_wait(&thread_limiter);
 
         ThreadInput* input = malloc(sizeof(ThreadInput));
         input->p = numbers[i];
@@ -104,7 +113,9 @@ int main() {
 
     printf("[");
     for (int i = 0; i < count; ++i) {
-        printf("{\"p\": %d, \"is_prime\": %s}%s", results[i].p, results[i].result ? "true" : "false", i < count - 1 ? "," : "");
+        printf("{\"p\": %d, \"is_prime\": %s}%s", results[i].p,
+               results[i].result ? "true" : "false",
+               i < count - 1 ? "," : "");
     }
     printf("]\n");
 
