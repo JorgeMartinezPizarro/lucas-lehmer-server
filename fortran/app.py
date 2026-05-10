@@ -1,18 +1,11 @@
 from flask import Flask, request, jsonify
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 
 app = Flask(__name__)
 
 
-@app.route("/isprime", methods=["POST"])
-def is_prime():
-    data = request.get_json()
-
-    if not data or "p" not in data:
-        return jsonify({"error": "Missing 'p'"}), 400
-
-    p = data["p"]
-
+def check_prime(p):
     try:
         result = subprocess.run(
             ["./prime", str(p)],
@@ -23,16 +16,46 @@ def is_prime():
 
         output = result.stdout.strip().lower()
 
-        return jsonify({
+        return {
             "p": p,
             "is_prime": output == "true"
-        })
+        }
 
     except subprocess.TimeoutExpired:
-        return jsonify({"error": "Fortran timeout"}), 500
+        return {
+            "p": p,
+            "error": "Fortran timeout"
+        }
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return {
+            "p": p,
+            "error": str(e)
+        }
+
+
+@app.route("/lltp", methods=["POST"])
+def lltp():
+    data = request.get_json()
+
+    if not data or "numbers" not in data or not isinstance(data["numbers"], list):
+        return jsonify({"error": "Missing or invalid 'numbers' list"}), 400
+
+    numbers = data["numbers"]
+
+    try:
+        with ThreadPoolExecutor() as executor:
+            results = list(executor.map(check_prime, numbers))
+
+        return jsonify({
+            "results": results
+        })
+
+    except Exception as e:
+        return jsonify({
+            "error": "Failed to execute Fortran code",
+            "details": str(e)
+        }), 500
 
 
 if __name__ == "__main__":
