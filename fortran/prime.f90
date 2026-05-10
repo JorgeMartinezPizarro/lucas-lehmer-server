@@ -115,4 +115,4 @@ contains
         if (iand(s(nw), int(ishft(1_k8, mod(p, 32)) - 1, k4)) /= 0) res = .false.
     end function
 
-end program llt_prime
+end program prime
