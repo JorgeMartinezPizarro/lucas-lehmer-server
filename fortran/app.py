@@ -47,9 +47,7 @@ def lltp():
         with ThreadPoolExecutor() as executor:
             results = list(executor.map(check_prime, numbers))
 
-        return jsonify({
-            "results": results
-        })
+        return jsonify(results)
 
     except Exception as e:
         return jsonify({
