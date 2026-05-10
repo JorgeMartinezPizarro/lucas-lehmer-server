@@ -18,7 +18,7 @@ Feel free to modify the tag value of the docker images to create your own fork -
 make start
 ```
 
-will start the 4 servers,
+will start the 2 servers,
 
 ```
 make build push
@@ -28,9 +28,7 @@ will build the current code (go server) and push the generated container to dock
 
 ## Note
 
-Currently I am working on a python server to connect to a fortran function.
-
-Only go is getting further, the other languages still available in hub docker, scala, rust and c++:
+Currently I am working on two servers, c and go.
 
 https://hub.docker.com/repository/docker/jorgemartinezpizarro/lucas-lehmer-server/tags
 
@@ -38,5 +36,3 @@ https://hub.docker.com/repository/docker/jorgemartinezpizarro/lucas-lehmer-serve
 ## TODO
 
 Add each endpoint spec (PORT, parameters)
-
-Use Python flask to manage other services, in special Fortran and Go.
