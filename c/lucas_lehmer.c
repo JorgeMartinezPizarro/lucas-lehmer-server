@@ -1,128 +1,363 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
 #include <pthread.h>
 #include <gmp.h>
-#include <string.h>
-#include <stdbool.h>
-#include <semaphore.h>
+#include <ctype.h>
+#include <unistd.h>
+
+/* --------------------------------------------------------- */
+/* Result structure                                          */
+/* --------------------------------------------------------- */
 
 typedef struct {
     int p;
-    bool result;
+    bool is_prime;
 } TestResult;
 
+/* --------------------------------------------------------- */
+/* Lock-free work queue                                      */
+/* --------------------------------------------------------- */
+
 typedef struct {
-    int p;
-    int index;
-} ThreadInput;
+    int* numbers;
+    int count;
 
-TestResult* results;
-pthread_t* threads;
-int count;
+    volatile int next_index;
+} WorkQueue;
 
-sem_t thread_limiter;
+typedef struct {
+    WorkQueue* queue;
+    TestResult* results;
+} WorkerContext;
 
-void* thread_func(void* arg) {
-    ThreadInput* input = (ThreadInput*)arg;
-    int p = input->p;
-    int index = input->index;
+/* --------------------------------------------------------- */
+/* Small primality test                                      */
+/* --------------------------------------------------------- */
 
-    printf("Thread %d started for p=%d\n", index, p);
-    fflush(stdout);
+static bool is_prime_u32(uint32_t n) {
+
+    if (n < 2) return false;
+    if (n == 2 || n == 3) return true;
+    if ((n & 1) == 0) return false;
+
+    for (uint32_t i = 3; (uint64_t)i * i <= n; i += 2) {
+
+        if (n % i == 0) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/* --------------------------------------------------------- */
+/* Fast reduction mod (2^p - 1)                              */
+/* --------------------------------------------------------- */
+
+static inline void mersenne_reduce(
+    mpz_t x,
+    const int p,
+    const mpz_t mp,
+    mpz_t high
+) {
+
+    /*
+        Since:
+
+            x < (2^p - 1)^2 < 2^(2p)
+
+        after squaring, we need at most
+        two folds.
+    */
+
+    /* first fold */
+
+    mpz_fdiv_q_2exp(high, x, p);
+    mpz_fdiv_r_2exp(x, x, p);
+
+    mpz_add(x, x, high);
+
+    /* second fold (only if needed) */
+
+    mpz_fdiv_q_2exp(high, x, p);
+
+    if (mpz_cmp_ui(high, 0) != 0) {
+
+        mpz_fdiv_r_2exp(x, x, p);
+
+        mpz_add(x, x, high);
+    }
+
+    /* final correction */
+
+    if (mpz_cmp(x, mp) >= 0) {
+        mpz_sub(x, x, mp);
+    }
+}
+
+/* --------------------------------------------------------- */
+/* Lucas-Lehmer test                                         */
+/* --------------------------------------------------------- */
+
+static bool lucas_lehmer(int p) {
 
     if (p == 2) {
-        results[index].p = p;
-        results[index].result = true;
-        free(arg);
-        sem_post(&thread_limiter);  // 🔧 IMPORTANTE: liberar el semáforo
-        printf("Thread %d done for p=2 (trivial prime)\n", index);
-        fflush(stdout);
-        return NULL;
+        return true;
     }
 
-    mpz_t m, s, two;
-    mpz_inits(m, s, two, NULL);
+    /*
+        LLT only valid for prime exponents
+    */
 
-    // m = 2^p - 1
-    mpz_ui_pow_ui(m, 2, p);
-    mpz_sub_ui(m, m, 1);
+    if (!is_prime_u32((uint32_t)p)) {
+        return false;
+    }
 
-    mpz_set_ui(s, 4);
-    mpz_set_ui(two, 2);
+    mpz_t s;
+    mpz_t mp;
+    mpz_t high;
+
+    mpz_init_set_ui(s, 4);
+
+    /*
+        mp = 2^p - 1
+    */
+
+    mpz_init(mp);
+
+    mpz_setbit(mp, p);
+    mpz_sub_ui(mp, mp, 1);
+
+    mpz_init(high);
 
     for (int i = 0; i < p - 2; ++i) {
+
+        /*
+            s = s²
+        */
+
         mpz_mul(s, s, s);
-        mpz_sub(s, s, two);
-        mpz_mod(s, s, m);
+
+        /*
+            fast reduction mod M_p
+        */
+
+        mersenne_reduce(s, p, mp, high);
+
+        /*
+            s = s - 2 mod M_p
+        */
+
+        if (mpz_cmp_ui(s, 2) < 0) {
+            mpz_add(s, s, mp);
+        }
+
+        mpz_sub_ui(s, s, 2);
     }
 
-    results[index].p = p;
-    results[index].result = (mpz_cmp_ui(s, 0) == 0);
+    bool result = (mpz_cmp_ui(s, 0) == 0);
 
-    mpz_clears(m, s, two, NULL);
-    free(arg);
+    mpz_clear(s);
+    mpz_clear(mp);
+    mpz_clear(high);
 
-    sem_post(&thread_limiter);  // 🔧 IMPORTANTE: liberar semáforo tras el trabajo
-    printf("Thread %d done for p=%d result=%s\n", index, p, results[index].result ? "true" : "false");
-    fflush(stdout);
+    return result;
+}
+
+/* --------------------------------------------------------- */
+/* Worker thread                                             */
+/* --------------------------------------------------------- */
+
+static void* worker_thread(void* arg) {
+
+    WorkerContext* ctx = (WorkerContext*)arg;
+
+    while (true) {
+
+        int index =
+            __atomic_fetch_add(
+                &ctx->queue->next_index,
+                1,
+                __ATOMIC_RELAXED
+            );
+
+        if (index >= ctx->queue->count) {
+            break;
+        }
+
+        int p = ctx->queue->numbers[index];
+
+        bool result = lucas_lehmer(p);
+
+        ctx->results[index].p = p;
+        ctx->results[index].is_prime = result;
+    }
 
     return NULL;
 }
 
-int main() {
-    char buffer[65536];
-    size_t bytes_read = fread(buffer, 1, sizeof(buffer) - 1, stdin);
-    buffer[bytes_read] = '\0';
+/* --------------------------------------------------------- */
+/* Parse integer array from stdin                            */
+/* --------------------------------------------------------- */
 
-    int max_threads = 8;
-    sem_init(&thread_limiter, 0, max_threads);
+static int parse_input(int** out_numbers) {
 
-    int* numbers = malloc(sizeof(int) * 100000);
-    count = 0;
+    size_t cap = 1024;
+    size_t count = 0;
 
-    char* token = strtok(buffer, "[, ]");
-    while (token != NULL) {
-        int val = atoi(token);
-        if (val > 0) {
-            numbers[count++] = val;
-        }
-        token = strtok(NULL, "[, ]");
+    int* numbers = malloc(cap * sizeof(int));
+
+    if (!numbers) {
+        return -1;
     }
 
-    results = malloc(sizeof(TestResult) * count);
-    threads = malloc(sizeof(pthread_t) * count);
+    int value = 0;
+    bool in_number = false;
 
-    for (int i = 0; i < count; ++i) {
-        sem_wait(&thread_limiter);
+    int c;
 
-        ThreadInput* input = malloc(sizeof(ThreadInput));
-        input->p = numbers[i];
-        input->index = i;
-        if (pthread_create(&threads[i], NULL, thread_func, input) != 0) {
-            fprintf(stderr, "Error creando hilo %d\n", i);
-            results[i].p = numbers[i];
-            results[i].result = false;
-            sem_post(&thread_limiter);
-            free(input);
+    while ((c = getchar()) != EOF) {
+
+        if (isdigit(c)) {
+
+            value = value * 10 + (c - '0');
+
+            in_number = true;
+
+        } else if (in_number) {
+
+            if (count >= cap) {
+
+                cap *= 2;
+
+                int* tmp =
+                    realloc(numbers, cap * sizeof(int));
+
+                if (!tmp) {
+                    free(numbers);
+                    return -1;
+                }
+
+                numbers = tmp;
+            }
+
+            numbers[count++] = value;
+
+            value = 0;
+            in_number = false;
         }
     }
 
-    for (int i = 0; i < count; ++i) {
+    if (in_number) {
+        numbers[count++] = value;
+    }
+
+    *out_numbers = numbers;
+
+    return (int)count;
+}
+
+/* --------------------------------------------------------- */
+/* Sort descending                                           */
+/* --------------------------------------------------------- */
+
+static int cmp_desc(const void* a, const void* b) {
+
+    const int ia = *(const int*)a;
+    const int ib = *(const int*)b;
+
+    return ib - ia;
+}
+
+/* --------------------------------------------------------- */
+/* Main                                                      */
+/* --------------------------------------------------------- */
+
+int main(void) {
+
+    int* numbers = NULL;
+
+    int count = parse_input(&numbers);
+
+    if (count <= 0) {
+
+        fprintf(stderr, "Invalid input\n");
+
+        return 1;
+    }
+
+    /*
+        Large exponents first:
+        much better load balancing
+    */
+
+    qsort(numbers, count, sizeof(int), cmp_desc);
+
+    TestResult* results =
+        malloc(sizeof(TestResult) * count);
+
+    if (!results) {
+
+        free(numbers);
+
+        return 1;
+    }
+
+    WorkQueue queue = {
+        .numbers = numbers,
+        .count = count,
+        .next_index = 0
+    };
+
+    long cpu_count =
+        sysconf(_SC_NPROCESSORS_ONLN);
+
+    if (cpu_count < 1) {
+        cpu_count = 4;
+    }
+
+    pthread_t* threads =
+        malloc(sizeof(pthread_t) * cpu_count);
+
+    WorkerContext ctx = {
+        .queue = &queue,
+        .results = results
+    };
+
+    for (long i = 0; i < cpu_count; ++i) {
+
+        pthread_create(
+            &threads[i],
+            NULL,
+            worker_thread,
+            &ctx
+        );
+    }
+
+    for (long i = 0; i < cpu_count; ++i) {
+
         pthread_join(threads[i], NULL);
     }
 
     printf("[");
+
     for (int i = 0; i < count; ++i) {
-        printf("{\"p\": %d, \"is_prime\": %s}%s", results[i].p,
-               results[i].result ? "true" : "false",
-               i < count - 1 ? "," : "");
+
+        printf(
+            "{\"p\":%d,\"is_prime\":%s}%s",
+            results[i].p,
+            results[i].is_prime ? "true" : "false",
+            (i + 1 < count) ? "," : ""
+        );
     }
+
     printf("]\n");
 
     free(numbers);
     free(results);
     free(threads);
-    sem_destroy(&thread_limiter);
 
     return 0;
 }

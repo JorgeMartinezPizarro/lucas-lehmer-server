@@ -13,7 +13,12 @@ COPY app.py .
 COPY lucas_lehmer.c .
 
 # Compilar el código C con GMP
-RUN gcc -O2 -o lucas_lehmer lucas_lehmer.c -lgmp -lpthread
+RUN gcc \
+	-Ofast -march=native -funroll-loops \
+	-fomit-frame-pointer -flto \
+	-o lucas_lehmer \
+	lucas_lehmer.c \
+	-lgmp -lpthread
 
 # Instalar Flask y Gunicorn
 RUN pip install flask gunicorn
