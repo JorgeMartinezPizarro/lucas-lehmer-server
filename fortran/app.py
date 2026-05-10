@@ -3,32 +3,37 @@ import subprocess
 
 app = Flask(__name__)
 
-@app.route('/sieve', methods=['GET'])
-def sieve():
+
+@app.route("/isprime", methods=["POST"])
+def is_prime():
+    data = request.get_json()
+
+    if not data or "p" not in data:
+        return jsonify({"error": "Missing 'p'"}), 400
+
+    p = data["p"]
+
     try:
-        # Obtener el límite superior del parámetro de la solicitud
-        n = request.args.get('n', type=int)
-
-        if not n or n <= 0:
-            return jsonify({"error": "Invalid input. Provide a positive integer for 'n'."}), 400
-
-        # Ejecutar el programa Fortran con el argumento n
         result = subprocess.run(
-            ['./sieve', str(n)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
+            ["./prime", str(p)],
+            capture_output=True,
+            text=True,
+            timeout=5
         )
 
-        if result.returncode != 0:
-            return jsonify({"error": result.stderr.strip()}), 500
+        output = result.stdout.strip().lower()
 
-        # Parsear la salida en una lista de números primos
-        primes = [int(x) for x in result.stdout.split()]
+        return jsonify({
+            "p": p,
+            "is_prime": output == "true"
+        })
 
-        return jsonify({"primes": primes})
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Fortran timeout"}), 500
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)

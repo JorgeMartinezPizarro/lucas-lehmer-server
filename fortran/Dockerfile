@@ -1,20 +1,18 @@
-FROM alpine:latest
+FROM python:3.12-slim
 
-# Instalar dependencias necesarias para Fortran y Python
-RUN apk add --no-cache gfortran build-base python3 py3-pip
+RUN apt-get update && \
+    apt-get install -y gfortran && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copiar el archivo fuente de Fortran y compilarlo
-COPY sieve.f90 .
-RUN gfortran -O3 -fopenmp -march=native -o sieve sieve.f90
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar la aplicación Flask
-COPY app.py .
+COPY . .
 
-# Instalar Gunicorn
-RUN pip install --break-system-packages flask gunicorn
+RUN gfortran -O2 prime.f90 -o prime
 
 EXPOSE 5000
 
-CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:5000", "app:app"]
+CMD ["python", "app.py"]
