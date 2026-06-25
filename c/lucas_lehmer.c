@@ -5,10 +5,9 @@
 #include <pthread.h>
 #include <gmp.h>
 #include <ctype.h>
+#include <string.h>
 #include <unistd.h>
 
-/* --------------------------------------------------------- */
-/* Result structure                                          */
 /* --------------------------------------------------------- */
 
 typedef struct {
@@ -16,14 +15,9 @@ typedef struct {
     bool is_prime;
 } TestResult;
 
-/* --------------------------------------------------------- */
-/* Lock-free work queue                                      */
-/* --------------------------------------------------------- */
-
 typedef struct {
     int* numbers;
     int count;
-
     volatile int next_index;
 } WorkQueue;
 
@@ -33,331 +27,195 @@ typedef struct {
 } WorkerContext;
 
 /* --------------------------------------------------------- */
-/* Small primality test                                      */
-/* --------------------------------------------------------- */
 
-static bool is_prime_u32(uint32_t n) {
-
+static bool is_prime_u32(uint32_t n)
+{
     if (n < 2) return false;
-    if (n == 2 || n == 3) return true;
+    if (n < 4) return n > 1 && (n & 1);
     if ((n & 1) == 0) return false;
 
-    for (uint32_t i = 3; (uint64_t)i * i <= n; i += 2) {
-
-        if (n % i == 0) {
-            return false;
-        }
-    }
+    for (uint32_t i = 3; (uint64_t)i * i <= n; i += 2)
+        if (n % i == 0) return false;
 
     return true;
 }
 
 /* --------------------------------------------------------- */
-/* Fast reduction mod (2^p - 1)                              */
+/* Mersenne reduction (safe, simple)                        */
 /* --------------------------------------------------------- */
 
-static inline void mersenne_reduce(
-    mpz_t x,
-    const int p,
-    const mpz_t mp,
-    mpz_t high
-) {
+static inline void reduce_mersenne(mp_limb_t* x,
+                                   size_t* xn,
+                                   int p)
+{
+    size_t limbs = (p + GMP_LIMB_BITS - 1) / GMP_LIMB_BITS;
 
-    /*
-        Since:
-
-            x < (2^p - 1)^2 < 2^(2p)
-
-        after squaring, we need at most
-        two folds.
-    */
-
-    /* first fold */
-
-    mpz_fdiv_q_2exp(high, x, p);
-    mpz_fdiv_r_2exp(x, x, p);
-
-    mpz_add(x, x, high);
-
-    /* second fold (only if needed) */
-
-    mpz_fdiv_q_2exp(high, x, p);
-
-    if (mpz_cmp_ui(high, 0) != 0) {
-
-        mpz_fdiv_r_2exp(x, x, p);
-
-        mpz_add(x, x, high);
+    /* fold high limbs */
+    for (size_t i = limbs; i < *xn; i++) {
+        size_t j = i - limbs;
+        x[j] += x[i];
     }
 
-    /* final correction */
+    *xn = limbs;
 
-    if (mpz_cmp(x, mp) >= 0) {
-        mpz_sub(x, x, mp);
+    /* final carry fix */
+    for (size_t i = 0; i + 1 < *xn; i++) {
+        x[i + 1] += x[i] >> GMP_LIMB_BITS;
+        x[i] &= GMP_NUMB_MASK;
+    }
+
+    /* reduce overflow bits beyond p */
+    size_t excess_bits = (*xn * GMP_LIMB_BITS) - p;
+    if (excess_bits > 0 && *xn > 0) {
+        x[0] &= ((mp_limb_t)1 << (GMP_LIMB_BITS - excess_bits)) - 1;
     }
 }
 
 /* --------------------------------------------------------- */
-/* Lucas-Lehmer test                                         */
-/* --------------------------------------------------------- */
 
-static bool lucas_lehmer(int p) {
+static bool lucas_lehmer(int p)
+{
+    if (p == 2) return true;
+    if (!is_prime_u32((uint32_t)p)) return false;
 
-    if (p == 2) {
-        return true;
-    }
+    size_t max_limbs = (p / GMP_LIMB_BITS) + 3;
 
-    /*
-        LLT only valid for prime exponents
-    */
+    mp_limb_t* s  = calloc(max_limbs, sizeof(mp_limb_t));
+    mp_limb_t* t  = calloc(max_limbs * 2, sizeof(mp_limb_t));
 
-    if (!is_prime_u32((uint32_t)p)) {
-        return false;
-    }
+    size_t sn = 1;
+    s[0] = 4;
 
-    mpz_t s;
-    mpz_t mp;
-    mpz_t high;
+    for (int i = 0; i < p - 2; i++) {
 
-    mpz_init_set_ui(s, 4);
+        /* square: t = s*s */
+        mpn_sqr(t, s, sn);
 
-    /*
-        mp = 2^p - 1
-    */
+        sn *= 2;
 
-    mpz_init(mp);
+        /* reduce mod Mersenne */
+        reduce_mersenne(t, &sn, p);
 
-    mpz_setbit(mp, p);
-    mpz_sub_ui(mp, mp, 1);
+        /* copy back */
+        memcpy(s, t, sn * sizeof(mp_limb_t));
 
-    mpz_init(high);
-
-    for (int i = 0; i < p - 2; ++i) {
-
-        /*
-            s = s²
-        */
-
-        mpz_mul(s, s, s);
-
-        /*
-            fast reduction mod M_p
-        */
-
-        mersenne_reduce(s, p, mp, high);
-
-        /*
-            s = s - 2 mod M_p
-        */
-
-        if (mpz_cmp_ui(s, 2) < 0) {
-            mpz_add(s, s, mp);
+        /* s = s - 2 mod M_p */
+        if (sn == 0) {
+            s[0] = 0;
+            sn = 1;
         }
 
-        mpz_sub_ui(s, s, 2);
+        if (s[0] < 2) {
+            s[0] += ((mp_limb_t)1 << GMP_LIMB_BITS) - 2;
+            if (sn > 1) s[1]--;
+        } else {
+            s[0] -= 2;
+        }
     }
 
-    bool result = (mpz_cmp_ui(s, 0) == 0);
+    bool ok = (sn == 1 && s[0] == 0);
 
-    mpz_clear(s);
-    mpz_clear(mp);
-    mpz_clear(high);
+    free(s);
+    free(t);
 
-    return result;
+    return ok;
 }
 
 /* --------------------------------------------------------- */
-/* Worker thread                                             */
-/* --------------------------------------------------------- */
 
-static void* worker_thread(void* arg) {
-
+static void* worker(void* arg)
+{
     WorkerContext* ctx = (WorkerContext*)arg;
+    WorkQueue* q = ctx->queue;
 
-    while (true) {
+    while (1) {
+        int i = __atomic_fetch_add(&q->next_index, 1, __ATOMIC_RELAXED);
+        if (i >= q->count) break;
 
-        int index =
-            __atomic_fetch_add(
-                &ctx->queue->next_index,
-                1,
-                __ATOMIC_RELAXED
-            );
-
-        if (index >= ctx->queue->count) {
-            break;
-        }
-
-        int p = ctx->queue->numbers[index];
-
-        bool result = lucas_lehmer(p);
-
-        ctx->results[index].p = p;
-        ctx->results[index].is_prime = result;
+        int p = q->numbers[i];
+        ctx->results[i].p = p;
+        ctx->results[i].is_prime = lucas_lehmer(p);
     }
 
     return NULL;
 }
 
 /* --------------------------------------------------------- */
-/* Parse integer array from stdin                            */
-/* --------------------------------------------------------- */
 
-static int parse_input(int** out_numbers) {
+static int parse_input(int** out)
+{
+    size_t cap = 1024, n = 0;
+    int* a = malloc(cap * sizeof(int));
 
-    size_t cap = 1024;
-    size_t count = 0;
-
-    int* numbers = malloc(cap * sizeof(int));
-
-    if (!numbers) {
-        return -1;
-    }
-
-    int value = 0;
-    bool in_number = false;
-
-    int c;
+    int v = 0, in = 0, c;
 
     while ((c = getchar()) != EOF) {
-
         if (isdigit(c)) {
-
-            value = value * 10 + (c - '0');
-
-            in_number = true;
-
-        } else if (in_number) {
-
-            if (count >= cap) {
-
+            v = v * 10 + (c - '0');
+            in = 1;
+        } else if (in) {
+            if (n == cap) {
                 cap *= 2;
-
-                int* tmp =
-                    realloc(numbers, cap * sizeof(int));
-
-                if (!tmp) {
-                    free(numbers);
-                    return -1;
-                }
-
-                numbers = tmp;
+                a = realloc(a, cap * sizeof(int));
             }
-
-            numbers[count++] = value;
-
-            value = 0;
-            in_number = false;
+            a[n++] = v;
+            v = 0;
+            in = 0;
         }
     }
 
-    if (in_number) {
-        numbers[count++] = value;
-    }
+    if (in) a[n++] = v;
 
-    *out_numbers = numbers;
-
-    return (int)count;
+    *out = a;
+    return (int)n;
 }
 
 /* --------------------------------------------------------- */
-/* Sort descending                                           */
-/* --------------------------------------------------------- */
 
-static int cmp_desc(const void* a, const void* b) {
-
-    const int ia = *(const int*)a;
-    const int ib = *(const int*)b;
-
-    return ib - ia;
+static int cmp_desc(const void* a, const void* b)
+{
+    return (*(int*)b - *(int*)a);
 }
 
 /* --------------------------------------------------------- */
-/* Main                                                      */
-/* --------------------------------------------------------- */
 
-int main(void) {
+int main()
+{
+    int* nums;
+    int count = parse_input(&nums);
 
-    int* numbers = NULL;
+    if (count <= 0) return 1;
 
-    int count = parse_input(&numbers);
+    qsort(nums, count, sizeof(int), cmp_desc);
 
-    if (count <= 0) {
+    TestResult* res = malloc(count * sizeof(TestResult));
 
-        fprintf(stderr, "Invalid input\n");
+    WorkQueue q = { nums, count, 0 };
 
-        return 1;
-    }
+    long threads = sysconf(_SC_NPROCESSORS_ONLN);
+    if (threads < 1) threads = 4;
 
-    /*
-        Large exponents first:
-        much better load balancing
-    */
+    pthread_t* th = malloc(threads * sizeof(pthread_t));
+    WorkerContext ctx = { &q, res };
 
-    qsort(numbers, count, sizeof(int), cmp_desc);
+    for (long i = 0; i < threads; i++)
+        pthread_create(&th[i], NULL, worker, &ctx);
 
-    TestResult* results =
-        malloc(sizeof(TestResult) * count);
-
-    if (!results) {
-
-        free(numbers);
-
-        return 1;
-    }
-
-    WorkQueue queue = {
-        .numbers = numbers,
-        .count = count,
-        .next_index = 0
-    };
-
-    long cpu_count =
-        sysconf(_SC_NPROCESSORS_ONLN);
-
-    if (cpu_count < 1) {
-        cpu_count = 4;
-    }
-
-    pthread_t* threads =
-        malloc(sizeof(pthread_t) * cpu_count);
-
-    WorkerContext ctx = {
-        .queue = &queue,
-        .results = results
-    };
-
-    for (long i = 0; i < cpu_count; ++i) {
-
-        pthread_create(
-            &threads[i],
-            NULL,
-            worker_thread,
-            &ctx
-        );
-    }
-
-    for (long i = 0; i < cpu_count; ++i) {
-
-        pthread_join(threads[i], NULL);
-    }
+    for (long i = 0; i < threads; i++)
+        pthread_join(th[i], NULL);
 
     printf("[");
 
-    for (int i = 0; i < count; ++i) {
-
-        printf(
-            "{\"p\":%d,\"is_prime\":%s}%s",
-            results[i].p,
-            results[i].is_prime ? "true" : "false",
-            (i + 1 < count) ? "," : ""
-        );
+    for (int i = 0; i < count; i++) {
+        printf("{\"p\":%d,\"is_prime\":%s}%s",
+            res[i].p,
+            res[i].is_prime ? "true" : "false",
+            (i + 1 < count ? "," : ""));
     }
 
     printf("]\n");
 
-    free(numbers);
-    free(results);
-    free(threads);
-
-    return 0;
+    free(nums);
+    free(res);
+    free(th);
 }
