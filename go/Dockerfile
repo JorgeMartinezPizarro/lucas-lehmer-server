@@ -1,24 +1,27 @@
-# Use the official Golang image
-FROM golang:latest
+# --- Build and test the Go server (cgo + GMP) ---
+FROM golang:1.27-trixie AS build
 
-# Install GMP library
-RUN apt-get update && apt-get install -y libgmp-dev
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libgmp-dev && \
+    rm -rf /var/lib/apt/lists/*
 
-# Set the Current Working Directory inside the container
-WORKDIR /app
+WORKDIR /src
 
-# Copy the source code into the container
-COPY main.go .
+COPY go.mod go.sum ./
+RUN go mod download
 
-# Initialize Go modules and download dependencies
-RUN go mod init myapp \
-    && go mod tidy
+COPY *.go ./
+RUN go test ./... && go build -o /out/server .
 
-# Build the Go app
-RUN go build -o app .
+# --- Final image: just the binary and libgmp ---
+FROM debian:trixie-slim
 
-# Expose port 8080 to the outside world
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libgmp10 && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /out/server /usr/local/bin/server
+
 EXPOSE 8080
 
-# Command to run the executable
-CMD ["./app"]
+CMD ["server"]

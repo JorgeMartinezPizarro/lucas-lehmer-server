@@ -209,7 +209,8 @@ static int cmp_desc(const void* a, const void* b)
 
 /* --------------------------------------------------------- */
 
-int main()
+/* usage: lucas_lehmer [threads] < numbers (threads defaults to the CPU count) */
+int main(int argc, char** argv)
 {
     int* nums;
     int count = parse_input(&nums);
@@ -222,8 +223,10 @@ int main()
 
     WorkQueue q = { nums, count, 0 };
 
-    long threads = sysconf(_SC_NPROCESSORS_ONLN);
+    long threads = argc > 1 ? strtol(argv[1], NULL, 10)
+                            : sysconf(_SC_NPROCESSORS_ONLN);
     if (threads < 1) threads = 4;
+    if (threads > count) threads = count;
 
     pthread_t* th = malloc(threads * sizeof(pthread_t));
     WorkerContext ctx = { &q, res };

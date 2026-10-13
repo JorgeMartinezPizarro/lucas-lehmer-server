@@ -1,14 +1,14 @@
-PHONY: build push start
+.PHONY: build push start stop test
 
-DOCKER_USER=jorgemartinezpizarro
+export DOCKER_USER ?= jorgemartinezpizarro
 
 build:
-	cd go && docker build -t ${DOCKER_USER}/lucas-lehmer-server:go .
-	cd c && docker build -t ${DOCKER_USER}/lucas-lehmer-server:c .
+	docker compose build
 push:
-	docker push ${DOCKER_USER}/lucas-lehmer-server:go
-	docker push ${DOCKER_USER}/lucas-lehmer-server:c
+	docker compose push
 start:
 	docker compose up -d
 stop:
 	docker compose down --remove-orphans
+test:
+	python3 scripts/smoke_test.py

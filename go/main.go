@@ -1,132 +1,192 @@
 package main
 
 import (
+	"cmp"
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"math"
 	"net/http"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
-	"github.com/gorilla/mux"
 	"github.com/ncw/gmp"
 )
 
-// lucasLehmerTest using gmp for high precision arithmetic
-func lucasLehmerTest(p *gmp.Int) bool {
-	if p.Cmp(gmp.NewInt(2)) == 0 {
-		return true
+// maxExponent matches the C server, which stores p in an int.
+const maxExponent = math.MaxInt32
+
+// isPrime reports whether n is prime. 2^p - 1 can only be prime if p is.
+func isPrime(n uint32) bool {
+	if n < 2 {
+		return false
 	}
-
-	s := gmp.NewInt(4)
-	two := gmp.NewInt(2)
-	mersenneNumber := new(gmp.Int).Sub(new(gmp.Int).Exp(gmp.NewInt(2), p, nil), gmp.NewInt(1))
-
-	for i := int64(0); i < p.Int64()-2; i++ {
-		s.Mul(s, s)
-		s.Sub(s, two)
-		s.Mod(s, mersenneNumber)
+	if n%2 == 0 {
+		return n == 2
 	}
-
-	return s.Cmp(gmp.NewInt(0)) == 0
-}
-
-    
-// Worker function for processing numbers
-func worker(id int, numbers <-chan *gmp.Int, results chan<- struct {
-	P       string `json:"p"`
-	IsPrime bool   `json:"isPrime"`
-}, wg *sync.WaitGroup) {
-	defer wg.Done()
-	for num := range numbers {
-		fmt.Printf("Thread %d started processing number: %s\n", id, num.String()) // Log que indica el inicio
-		isPrime := lucasLehmerTest(num)
-		results <- struct {
-			P       string `json:"p"`
-			IsPrime bool   `json:"isPrime"`
-		}{
-			P:       num.String(),
-			IsPrime: isPrime,
+	for i := uint64(3); i*i <= uint64(n); i += 2 {
+		if uint64(n)%i == 0 {
+			return false
 		}
 	}
+	return true
 }
 
-// LLTPHandler to handle incoming HTTP requests for LLT
-func LLTPHandler(w http.ResponseWriter, r *http.Request) {
-	var requestData struct {
-		Numbers    string `json:"numbers"`
-		NumThreads int    `json:"num_threads"`
+// lucasLehmer reports whether the Mersenne number 2^p - 1 is prime.
+func lucasLehmer(p uint32) bool {
+	if p == 2 {
+		return true
+	}
+	if !isPrime(p) {
+		return false
 	}
 
-	err := json.NewDecoder(r.Body).Decode(&requestData)
-	if err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+	m := new(gmp.Int).Lsh(gmp.NewInt(1), uint(p))
+	m.SubUint32(m, 1)
+
+	s := gmp.NewInt(4)
+	hi := new(gmp.Int)
+
+	// s stays in [0, M_p) after every iteration.
+	for i := uint32(0); i < p-2; i++ {
+		s.Mul(s, s)
+
+		// 2^p = 1 (mod M_p), so s = hi * 2^p + lo = hi + lo < 2 * M_p
+		hi.Rsh(s, uint(p))
+		s.And(s, m)
+		s.Add(s, hi)
+		if s.Cmp(m) >= 0 {
+			s.Sub(s, m)
+		}
+
+		if s.CmpUint32(2) < 0 {
+			s.Add(s, m)
+		}
+		s.SubUint32(s, 2)
+	}
+
+	return s.Sign() == 0
+}
+
+type result struct {
+	P       uint32 `json:"p"`
+	IsPrime bool   `json:"is_prime"`
+}
+
+// testAll runs the LLT on every exponent with the given number of workers.
+// Results are sorted by p in descending order, the same order they are
+// scheduled in, so the slowest tests start first. Workers stop picking new
+// exponents once ctx is done.
+func testAll(ctx context.Context, ps []uint32, workers int) []result {
+	sorted := slices.Clone(ps)
+	slices.SortFunc(sorted, func(a, b uint32) int { return cmp.Compare(b, a) })
+
+	results := make([]result, len(sorted))
+	indexes := make(chan int)
+
+	var wg sync.WaitGroup
+	for w := 0; w < min(workers, len(sorted)); w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range indexes {
+				p := sorted[i]
+				log.Printf("worker %d: testing p=%d", w, p)
+				results[i] = result{P: p, IsPrime: lucasLehmer(p)}
+			}
+		}()
+	}
+
+	for i := range sorted {
+		if ctx.Err() != nil {
+			break
+		}
+		indexes <- i
+	}
+	close(indexes)
+	wg.Wait()
+
+	return results
+}
+
+// parseExponent accepts a JSON integer or a string of decimal digits.
+func parseExponent(raw json.RawMessage) (uint32, error) {
+	text := string(raw)
+	if strings.HasPrefix(text, `"`) {
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return 0, err
+		}
+		text = strings.TrimSpace(text)
+	}
+
+	p, err := strconv.ParseUint(text, 10, 32)
+	if err != nil || p > maxExponent {
+		return 0, fmt.Errorf("invalid exponent %s, expected an integer between 0 and %d", raw, maxExponent)
+	}
+	return uint32(p), nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, msg string) {
+	writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
+}
+
+// lucasLehmerHandler serves the API shared with the C server:
+//
+//	POST /lucas-lehmer-test {"numbers": [3, "5", 7], "num_threads": 4}
+//	-> {"results": [{"p": 7, "is_prime": true}, ...]}
+//
+// num_threads is optional and defaults to the number of CPUs.
+func lucasLehmerHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Numbers    []json.RawMessage `json:"numbers"`
+		NumThreads *json.RawMessage  `json:"num_threads"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Numbers == nil {
+		writeError(w, "Missing or invalid 'numbers' list")
 		return
 	}
 
-	numberStrs := strings.Split(requestData.Numbers, ",")
-	var numbers []*gmp.Int
-	for _, numStr := range numberStrs {
-		num := new(gmp.Int)
-		if _, ok := num.SetString(numStr, 10); !ok {
-			http.Error(w, fmt.Sprintf("Invalid number: %s", numStr), http.StatusBadRequest)
+	ps := make([]uint32, len(req.Numbers))
+	for i, raw := range req.Numbers {
+		p, err := parseExponent(raw)
+		if err != nil {
+			writeError(w, err.Error())
 			return
 		}
-		numbers = append(numbers, num)
+		ps[i] = p
 	}
 
-	numThreads := requestData.NumThreads
-	if numThreads <= 0 {
-		numThreads = 1
-	}
-
-	// Create channels for task distribution and results
-	tasks := make(chan *gmp.Int, len(numbers))
-	results := make(chan struct {
-		P       string `json:"p"`
-		IsPrime bool   `json:"isPrime"`
-	}, len(numbers))
-
-	// Start worker goroutines
-	var wg sync.WaitGroup
-	for i := 0; i < numThreads; i++ {
-		wg.Add(1)
-		go worker(i, tasks, results, &wg)
-	}
-
-	// Send tasks to workers
-	go func() {
-		for _, num := range numbers {
-			tasks <- num
+	workers := runtime.NumCPU()
+	if req.NumThreads != nil && string(*req.NumThreads) != "null" {
+		n, err := strconv.Atoi(string(*req.NumThreads))
+		if err != nil || n < 1 {
+			writeError(w, "'num_threads' must be a positive integer")
+			return
 		}
-		close(tasks)
-	}()
-
-	// Wait for workers to finish and close the results channel
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	// Collect results
-	var primeResults []struct {
-		P       string `json:"p"`
-		IsPrime bool   `json:"isPrime"`
-	}
-	for result := range results {
-		primeResults = append(primeResults, result)
+		workers = n
 	}
 
-	json.NewEncoder(w).Encode(primeResults)
+	writeJSON(w, http.StatusOK, map[string][]result{"results": testAll(r.Context(), ps, workers)})
+}
+
+func newMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /lucas-lehmer-test", lucasLehmerHandler)
+	return mux
 }
 
 func main() {
-	r := mux.NewRouter()
-	r.HandleFunc("/lltp", LLTPHandler).Methods("POST")
-	http.Handle("/", r)
-
-	port := ":8080"
-	fmt.Println("Server running on port", port)
-	if err := http.ListenAndServe(port, nil); err != nil {
-		fmt.Println("Error starting server:", err)
-	}
+	addr := ":8080"
+	log.Println("Server running on port", addr)
+	log.Fatal(http.ListenAndServe(addr, newMux()))
 }
