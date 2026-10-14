@@ -1,29 +1,36 @@
-# --- Compilar el binario C con GMP ---
+# --- Compilar el binario C con GMP y FFTW ---
 FROM debian:trixie-slim AS build
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends gcc libc6-dev libgmp-dev && \
+    apt-get install -y --no-install-recommends gcc libc6-dev libgmp-dev libfftw3-dev && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
-COPY lucas_lehmer.c .
+COPY *.c *.h check.sh ./
 
-# Flags portables: el bucle caliente está dentro de libgmp, y -march=native
-# no aportaba nada medible pero impedía usar la imagen en otra CPU.
-RUN gcc -O3 -flto -Wall -Wextra \
+# Flags portables: el trabajo pesado está en libgmp y FFTW, que eligen el
+# código para la CPU en tiempo de ejecución; -march=native no aportaba nada
+# medible pero impedía usar la imagen en otra CPU.
+RUN gcc -O3 -flto -fopenmp -Wall -Wextra \
 	-o lucas_lehmer \
-	lucas_lehmer.c \
-	-lgmp -lpthread
+	lucas_lehmer.c llt.c llt_mpn.c llt_fft.c fourstep.c \
+	-lfftw3 -lgmp -lpthread -lm
 
-# Comprobar el LLT antes de generar la imagen
-RUN test "$(echo '[0,1,2,3,4,5,7,11,13,61,67,89,127,521,523,607]' | ./lucas_lehmer)" = \
-	'[{"p":607,"is_prime":true},{"p":523,"is_prime":false},{"p":521,"is_prime":true},{"p":127,"is_prime":true},{"p":89,"is_prime":true},{"p":67,"is_prime":false},{"p":61,"is_prime":true},{"p":13,"is_prime":true},{"p":11,"is_prime":false},{"p":7,"is_prime":true},{"p":5,"is_prime":true},{"p":4,"is_prime":false},{"p":3,"is_prime":true},{"p":2,"is_prime":true},{"p":1,"is_prime":false},{"p":0,"is_prime":false}]'
+# Comprobar el LLT antes de generar la imagen: FFT y GMP coinciden hasta
+# p = 3000 y el binario encuentra los exponentes conocidos hasta 44497
+RUN sh check.sh 3000 ./lucas_lehmer
+
+# Herramienta de desarrollo, no va en la imagen final (make estimate / make scale)
+RUN gcc -O3 -flto -fopenmp -Wall -Wextra \
+	-o test_llt \
+	test_llt.c llt.c llt_mpn.c llt_fft.c fourstep.c \
+	-lfftw3 -lgmp -lpthread -lm
 
 # --- Imagen final: Flask + gunicorn + binario ---
 FROM python:3.11-slim-trixie
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends libgmp10 && \
+    apt-get install -y --no-install-recommends libgmp10 libfftw3-double3 libgomp1 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
